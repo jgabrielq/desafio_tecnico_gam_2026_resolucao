@@ -1,0 +1,13 @@
+plan	mes	avg_minutos_resposta	tickets_com_resposta	tickets_sem_resposta
+enterprise	2026-05	31.82	133	15
+free	2026-05	311.45	72	11
+pro	2026-05	122.34	118	22
+enterprise	2026-06	30.95	139	19
+free	2026-06	353.53	89	9
+pro	2026-06	118.54	176	23
+enterprise	2026-07	32.86	207	39
+free	2026-07	328.75	139	16
+pro	2026-07	111.36	246	46
+enterprise	2026-08	32.14	238	42
+free	2026-08	323.67	256	40
+pro	2026-08	114.45	405	80
