@@ -15,6 +15,21 @@ histórico de mudanças dos clientes (SCD Tipo 2).
 **Princípio central**: Silver é a fonte de verdade para consumo analítico.
 Toda deduplicação, tipagem correta e modelagem dimensional acontece aqui.
 
+> **Nota de implementação**: este spec foi implementado literalmente, sem
+> nenhuma correção funcional — a lógica de dedup, os dois `MERGE INTO` do
+> SCD2 e o particionamento funcionaram como descritos, inclusive validados
+> contra o batch 2 (schema drift e mudanças de plano). A única diferença em
+> relação ao código mostrado abaixo é estilística, não uma correção: nos
+> blocos `if __name__ == "__main__":` de `silver_events.py` e
+> `silver_customers.py`, o `try/finally` foi trocado por
+> `with SparkSession.builder...as spark:` — por consistência com o estilo já
+> adotado em `bronze_events.py`, sem impacto de comportamento (`SparkSession`
+> suporta o protocolo de context manager desde o Spark 3.2 e chama
+> `spark.stop()` na saída do bloco da mesma forma). Os ajustes reais feitos
+> durante a Parte 2 (schema drift, cast de tipos, boundary de watermark)
+> aconteceram todos na Bronze e na Ingestão, não na Silver — ver
+> `AJUSTES_PARTE2_TRANSFORM.md`.
+
 ---
 
 ## Estrutura de arquivos a criar
