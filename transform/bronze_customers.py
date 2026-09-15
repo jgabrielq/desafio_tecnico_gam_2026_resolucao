@@ -30,6 +30,12 @@ def run(ingestion_date: str, spark) -> None:
     df = df.withColumn("_source_file", F.lit(raw_path))
     df = df.withColumn("_batch_id", F.lit(_batch_id))
 
+    # A Bronze declara is_active como STRING (conversão para BOOLEAN é
+    # trabalho da Silver). O JSON traz um booleano nativo — cast explícito
+    # evita ambiguidade de tipo no momento do append.
+    if "is_active" in df.columns:
+        df = df.withColumn("is_active", F.col("is_active").cast("string"))
+
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {config.BRONZE_NAMESPACE}")
 
     spark.sql(f"""
@@ -58,6 +64,16 @@ def run(ingestion_date: str, spark) -> None:
         DELETE FROM {config.BRONZE_NAMESPACE}.customers
         WHERE _batch_id = '{ingestion_date}'
     """)
+
+    # O append do Iceberg exige que a ordem das colunas do DataFrame bata com
+    # a ordem declarada na tabela (ver mesmo ajuste em bronze_events.py).
+    known_columns = [
+        "customer_id", "company_name", "plan", "segment", "signup_date",
+        "country", "is_active", "updated_at", "_ingested_at", "_source_file",
+        "_batch_id",
+    ]
+    drift_columns = sorted(c for c in df.columns if c not in known_columns)
+    df = df.select(*known_columns, *drift_columns)
 
     df.writeTo(f"{config.BRONZE_NAMESPACE}.customers").append()
 

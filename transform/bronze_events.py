@@ -65,8 +65,26 @@ def run(ingestion_date: str, spark) -> None:
         WHERE _batch_id = '{ingestion_date}'
     """)
 
+    # Tolera schema drift (ex.: campo novo no payload da API): evolui a tabela
+    # em vez de rejeitar o append. Colunas antigas recebem NULL na coluna nova.
+    spark.sql(f"""
+        ALTER TABLE {config.BRONZE_NAMESPACE}.events
+        SET TBLPROPERTIES ('write.spark.accept-any-schema' = 'true')
+    """)
+
+    # O append do Iceberg exige que a ordem das colunas do DataFrame bata com
+    # a ordem final da tabela (colunas conhecidas primeiro, na ordem
+    # declarada; colunas novas de schema drift entram no fim). A leitura do
+    # JSON não garante essa ordem, então reordenamos explicitamente.
+    known_columns = [
+        "event_id", "customer_id", "event_type", "occurred_at", "updated_at",
+        "channel", "properties", "_ingested_at", "_source_file", "_batch_id",
+    ]
+    drift_columns = sorted(c for c in df.columns if c not in known_columns)
+    df = df.select(*known_columns, *drift_columns)
+
     # Salva os dados extraídos do JSON na tabela (.parquet) no Iceberg
-    df.writeTo(f"{config.BRONZE_NAMESPACE}.events").append()
+    df.writeTo(f"{config.BRONZE_NAMESPACE}.events").option("mergeSchema", "true").append()
 
     count = spark.sql(f"""
         SELECT COUNT(*) as total

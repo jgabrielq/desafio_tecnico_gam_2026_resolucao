@@ -124,6 +124,12 @@ def fetch_all_events(since: str | None = None) -> tuple[list[dict], dict]:
         # Throttle preventivo para não estourar o limite da API (manter o ritmo < 10 req/s)
         time.sleep(0.1)
 
+    # A API trata 'since' como inclusivo (>=), então o registro de fronteira
+    # (updated_at == since_param) volta a cada execução. Filtra client-side
+    # para manter a semântica de incremental estritamente exclusiva e evitar
+    # reprocessar o mesmo registro em execuções consecutivas no mesmo dia.
+    all_records = [r for r in all_records if r.get("updated_at", "") > since_param]
+
     metrics["records_fetched"] = len(all_records)
     metrics["duration_seconds"] = round(time.time() - start_time, 2)
 
