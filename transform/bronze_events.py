@@ -24,10 +24,10 @@ def run(ingestion_date: str, spark) -> None:
 
     df_raw = spark.read.json(raw_path)
 
-    # Preserva 'properties' como JSON string para tolerar schema drift
+    # Preserva 'properties' como JSON string para tolerar 'schema drift'
     df = df_raw.withColumn("properties", F.to_json(F.col("properties")))
 
-    # Colunas de controle
+    # Inserindo as colunas de controle
     _ingested_at = datetime.now(timezone.utc).isoformat()
     _batch_id = ingestion_date  # determinístico — garante idempotência
 
@@ -35,8 +35,10 @@ def run(ingestion_date: str, spark) -> None:
     df = df.withColumn("_source_file", F.lit(raw_path))
     df = df.withColumn("_batch_id", F.lit(_batch_id))
 
+    # Criando o NAMESPACE da camada Bronze no Iceberg
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {config.BRONZE_NAMESPACE}")
 
+    # Criando a ESTRUTURA da tabela (arquivo .parquet) para armazenar os dados extraídos do JSON
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {config.BRONZE_NAMESPACE}.events (
             event_id     STRING,
@@ -57,12 +59,13 @@ def run(ingestion_date: str, spark) -> None:
         )
     """)
 
-    # Idempotência: remove o batch anterior antes de reinserir
+    # Idempotência: remove os dados do 'batch_id' ('ingestion_date') anterior antes de reinserir
     spark.sql(f"""
         DELETE FROM {config.BRONZE_NAMESPACE}.events
         WHERE _batch_id = '{ingestion_date}'
     """)
 
+    # Salva os dados extraídos do JSON na tabela (.parquet) no Iceberg
     df.writeTo(f"{config.BRONZE_NAMESPACE}.events").append()
 
     count = spark.sql(f"""
@@ -92,11 +95,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    spark = SparkSession.builder \
+    with SparkSession.builder \
         .appName(f"bronze_events_{args.ingestion_date}") \
-        .getOrCreate()
-
-    try:
+        .getOrCreate() as spark:
+        
         run(args.ingestion_date, spark)
-    finally:
-        spark.stop()
