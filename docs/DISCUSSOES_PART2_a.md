@@ -70,3 +70,13 @@ Este bloco é o ponto de entrada do script quando ele é executado diretamente v
 - ``argparse.ArgumentParser()``: Cria o analisador de argumentos de linha de comando.  
 - ``add_argument("--ingestion_date", required=True)``: Define a flag ``--ingestion_date`` como obrigatória (``required=True``). Se o usuário rodar o comando sem passar a data, o Python interrompe a execução imediatamente e exibe uma mensagem no terminal explicando como usar o script.  
 - ``args = parser.parse_args()``: Lê os argumentos digitados no terminal e extrai a variável (acessada em ``args.ingestion_date``) para passá-la como parâmetro na função ``run()``
+
+---
+
+# Documentação Técnica: Script `bronze_customers.py`
+
+Mesma lógica do arquivo `bronze_eventos.py` mas com algumas diferenças importantes que valem ser destacadas:
+
+- **Ausência do tratamento de properties**: Como a entidade de clientes não possui um campo JSON dinâmico ou aninhado como em eventos, o script não executa a instrução ``F.to_json()``
+- **Preservação do campo ``is_active`` como ``STRING``**: Na definição do DDL da tabela Iceberg, a coluna is_active é mantida intencionalmente como ``STRING``. A conversão para o tipo ``BOOLEAN`` é delegada estritamente para a camada Silver, reforçando a regra de que a Bronze preserva o dado como ele chegou da fonte.
+- **Caminho de origem e tabela de destino**: A leitura é apontada para o prefixo raw/customers/ingestion_date={ingestion_date}/ e a gravação ocorre na tabela lakehouse.bronze.customers

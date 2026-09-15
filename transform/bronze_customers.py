@@ -1,8 +1,6 @@
 import logging
 from datetime import datetime, timezone
-
 from pyspark.sql import functions as F
-
 from transform import config
 
 logging.basicConfig(
