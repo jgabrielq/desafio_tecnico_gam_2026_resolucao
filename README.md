@@ -1,4 +1,4 @@
-# Lakehouse Desafio — Ingestão (Raw), Bronze e Silver
+# Lakehouse Desafio — Ingestão, Bronze, Silver, Gold e Qualidade
 
 Pipeline de dados em camadas para o desafio técnico de lakehouse
 on-premises (MinIO · Iceberg · Spark · Trino):
@@ -8,9 +8,17 @@ on-premises (MinIO · Iceberg · Spark · Trino):
    comprimido (`.json.gz`) no MinIO/S3 seguindo particionamento Hive por
    `ingestion_date`, e controla incrementalidade via watermarks.
 2. **Transformação** (`transform/`): jobs PySpark que leem a raw zone e
-   materializam tabelas Iceberg em duas camadas — **Bronze** (fiel à raw,
-   só tipagem básica) e **Silver** (deduplicada, tipada e com SCD Tipo 2
-   para o histórico de clientes).
+   materializam tabelas Iceberg em três camadas — **Bronze** (fiel à raw,
+   só tipagem básica), **Silver** (deduplicada, tipada e com SCD Tipo 2
+   para o histórico de clientes) e **Gold** (tabelas analíticas
+   pré-calculadas para as 3 queries de negócio).
+3. **Qualidade** (`quality/`): checks de qualidade sobre a Silver, com
+   resultados persistidos em `lakehouse.quality.check_results` e dois
+   níveis de severidade (`BLOCKING` interrompe o pipeline, `WARNING` só
+   registra).
+
+Ver também [`RODAR_PIPELINE.md`](RODAR_PIPELINE.md) para todos os comandos
+de execução e validação, camada por camada ou na sequência completa.
 
 ## Estrutura do repositório
 
@@ -28,7 +36,19 @@ transform/
 ├── bronze_events.py      # Job PySpark: raw/events → lakehouse.bronze.events
 ├── bronze_customers.py   # Job PySpark: raw/customers → lakehouse.bronze.customers
 ├── silver_events.py      # Job PySpark: bronze.events → lakehouse.silver.events (dedup)
-└── silver_customers.py   # Job PySpark: bronze.customers → lakehouse.silver.customers (SCD2)
+├── silver_customers.py   # Job PySpark: bronze.customers → lakehouse.silver.customers (SCD2)
+└── gold.py               # Job PySpark: silver → lakehouse.gold.* (3 tabelas analíticas)
+
+quality/
+└── checks.py             # 5 checks de qualidade sobre a Silver → lakehouse.quality.check_results
+
+sql/
+├── query1_top10_clientes.sql          # Top 10 clientes por volume de eventos (30d)
+├── query2_tempo_resposta_ticket.sql   # Tempo médio de resposta por plano/mês
+├── query3_retencao_coorte.sql         # Retenção por coorte de aquisição
+└── resultados/                        # CSVs de entrega gerados via Trino
+
+tests/                     # Scripts de teste manual (ingestão + conexão Spark/Iceberg)
 ```
 
 ## Camada de Ingestão (raw zone)
@@ -174,6 +194,55 @@ data de um evento":
   versões, porque a condição de fechamento exige `updated_at` estritamente
   maior que o já registrado.
 
+## Camada Gold (`transform/gold.py`)
+
+Job único que recalcula, do zero, as 3 tabelas analíticas em
+`lakehouse.gold` a partir da Silver — **não** recebe `--ingestion_date`,
+sempre considera o estado completo. `DELETE ... WHERE 1=1` + `INSERT`
+(overwrite completo) a cada execução, então é idempotente por construção.
+
+- **`top_clientes_30d`**: top 10 clientes por volume de eventos, na janela
+  de 30 dias relativa a `MAX(occurred_at)` da Silver — não `CURRENT_DATE`,
+  já que o dataset é sintético e fixo no tempo. Enriquece com
+  `company_name`/`plan`/`segment` **na data do evento** via o SCD2 da
+  Silver (`occurred_at BETWEEN valid_from AND valid_to`). Exclui eventos
+  órfãos (`_customer_exists = false`).
+- **`tempo_resposta_ticket`**: tempo médio (minutos) entre `ticket_opened`
+  e o primeiro `ticket_replied` do mesmo `ticket_id`, por plano e mês.
+  `LEFT JOIN` garante que tickets sem resposta aparecem no resultado com
+  `tickets_sem_resposta` explícito, em vez de serem descartados.
+- **`retencao_coorte`**: percentual de clientes com pelo menos 1 evento por
+  mês, agrupados pelo mês de `signup_date` (coorte de aquisição). Usa só
+  `is_current = true` para não duplicar clientes com histórico SCD2.
+
+As 3 queries de entrega (`sql/query{1,2,3}_*.sql`) só leem essas tabelas já
+materializadas — a lógica pesada (joins com SCD2, agregações) fica no job,
+não na query de consulta. Resultados e interpretações em
+`sql/resultados/*.csv` e nos comentários finais de cada `.sql`.
+
+## Camada de Qualidade (`quality/checks.py`)
+
+Roda sobre a Silver, persiste cada resultado em
+`lakehouse.quality.check_results` (**não** é idempotente por design — o
+histórico de execuções é o que importa para auditoria) e levanta
+`RuntimeError` se algum check `BLOCKING` falhar.
+
+| Check | Severidade | O que valida |
+|---|---|---|
+| `unicidade_event_id` | BLOCKING | Duplicatas de `event_id` na Silver (indicaria falha no `MERGE INTO`) |
+| `integridade_referencial_customer_id` | WARNING | Eventos com `customer_id` sem correspondência em `silver.customers` — comportamento documentado da fonte, não é falha |
+| `volumetria_events` | WARNING | Variação do volume do batch atual vs. média dos últimos 7 batches (limite: 50%) |
+| `dominios_invalidos` | WARNING | Valores fora do domínio esperado em `event_type` e `plan` |
+| `freshness_events` | BLOCKING | Defasagem entre o `ingestion_date` do batch e o `MAX(occurred_at)` daquele batch (limite: 2 dias) |
+
+Dois ajustes em relação à especificação original, documentados em
+[`AJUSTES_PARTE4_QUALITY.md`](AJUSTES_PARTE4_QUALITY.md): a lista de
+`event_type` válidos inclui `feature_used` (ausente na spec original), e o
+`freshness_events` compara contra o `ingestion_date` do próprio batch, não
+contra o relógio real da máquina — um dataset sintético e fixo no tempo
+faria esse check `BLOCKING` falhar permanentemente conforme os dias reais
+passam, mesmo com o pipeline saudável.
+
 ## Como executar
 
 Ingestão (raw zone), rodando no host:
@@ -198,6 +267,24 @@ docker exec -e PYTHONPATH=/tmp dl-spark spark-submit \
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit \
     /tmp/transform/silver_customers.py --ingestion_date 2026-03-11
 ```
+
+Gold — não recebe `--ingestion_date`:
+
+```bash
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py
+```
+
+Qualidade — mesmo padrão de deploy, mas copiando `quality/`:
+
+```bash
+docker cp quality dl-spark:/tmp/quality
+
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit \
+    /tmp/quality/checks.py --ingestion_date 2026-03-11
+```
+
+Ver [`RODAR_PIPELINE.md`](RODAR_PIPELINE.md) para a lista completa de
+comandos (ambiente, cada etapa isolada, e a sequência de aceite do desafio).
 
 ## Diagrama de execução — Ingestão (raw)
 
@@ -273,6 +360,52 @@ flowchart TD
     end
 ```
 
+## Diagrama de execução — Gold
+
+```mermaid
+flowchart TD
+    Start(["spark-submit gold.py\n(sem --ingestion_date)"]) --> CreateNS["CREATE NAMESPACE IF NOT EXISTS lakehouse.gold"]
+
+    CreateNS --> T1a["CREATE TABLE IF NOT EXISTS top_clientes_30d"]
+    T1a --> T1b["DELETE WHERE 1=1 (overwrite completo)"]
+    T1b --> T1c["INSERT: JOIN silver.events + silver.customers (SCD2)\nWHERE occurred_at >= MAX(occurred_at)-30d\nGROUP BY customer_id ... LIMIT 10"]
+
+    T1c --> T2a["CREATE TABLE IF NOT EXISTS tempo_resposta_ticket"]
+    T2a --> T2b["DELETE WHERE 1=1"]
+    T2b --> T2c["INSERT: ticket_opened LEFT JOIN ticket_replied\n(por ticket_id, via get_json_object)\nJOIN customers (SCD2) · GROUP BY plan, mes"]
+
+    T2c --> T3a["CREATE TABLE IF NOT EXISTS retencao_coorte"]
+    T3a --> T3b["DELETE WHERE 1=1"]
+    T3b --> T3c["INSERT: coortes (signup_date) JOIN atividade (occurred_at)\nGROUP BY cohort_month, activity_month"]
+
+    T3c --> Log["Log: gold_completed"]
+    Log --> End(["Job finalizado"])
+```
+
+## Diagrama de execução — Qualidade
+
+```mermaid
+flowchart TD
+    Start(["spark-submit checks.py --ingestion_date"]) --> CreateTbl["CREATE NAMESPACE + TABLE IF NOT EXISTS\nlakehouse.quality.check_results"]
+
+    CreateTbl --> C1["check_unicidade_event_id\n(BLOCKING)"]
+    C1 --> C2["check_integridade_referencial\n(WARNING)"]
+    C2 --> C3["check_volumetria\n(WARNING · vs média dos últimos 7 batches)"]
+    C3 --> C4["check_dominios\n(WARNING · event_type e plan)"]
+    C4 --> C5["check_freshness\n(BLOCKING · ingestion_date vs MAX(occurred_at) do batch)"]
+
+    C1 -.persiste.-> QT[("lakehouse.quality.check_results\n(append, não-idempotente por design)")]
+    C2 -.persiste.-> QT
+    C3 -.persiste.-> QT
+    C4 -.persiste.-> QT
+    C5 -.persiste.-> QT
+
+    QT --> Eval{"Algum BLOCKING\nfalhou?"}
+    Eval -- sim --> Raise["RuntimeError\n(interrompe o pipeline)"]
+    Eval -- não --> Log["Log: N PASSED | M FAILED"]
+    Log --> End(["Job finalizado"])
+```
+
 ## Camadas externas (arquitetura completa)
 
 ```mermaid
@@ -296,6 +429,15 @@ flowchart LR
     SilverEvents --> IcebergSilver[("Iceberg REST Catalog\nlakehouse.silver.events / .customers")]
     SilverCustomers --> IcebergSilver
 
+    IcebergSilver --> Quality["quality/checks.py\n(5 checks, BLOCKING/WARNING)"]
+    Quality --> IcebergQuality[("lakehouse.quality.check_results")]
+
+    IcebergSilver --> Gold["transform/gold.py\n(3 tabelas analíticas)"]
+    Gold --> IcebergGold[("Iceberg REST Catalog\nlakehouse.gold.*")]
+
     IcebergBronze -.consulta.-> Trino[("Trino")]
     IcebergSilver -.consulta.-> Trino
+    IcebergGold -.consulta.-> Trino
+    IcebergQuality -.consulta.-> Trino
+    Trino --> SQL["sql/query{1,2,3}_*.sql\n→ sql/resultados/*.csv"]
 ```
