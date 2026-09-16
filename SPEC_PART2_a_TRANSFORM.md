@@ -96,8 +96,16 @@ df_raw = spark.read.json(raw_path)
 ```
 
 O Spark vai inferir o schema automaticamente a partir do JSON. Isso é
-intencional na Bronze — não forçar schema fixo permite absorver schema drift
-(campo novo na API) sem quebrar.
+intencional na Bronze — não forçar schema fixo na **leitura** permite
+absorver schema drift (campo novo na API) sem quebrar.
+
+> **Atenção**: isso resolve só a leitura. A tabela Iceberg (seção seguinte)
+> declara um schema fixo no `CREATE TABLE`, e o Iceberg **rejeita por padrão**
+> um `append` cujo DataFrame tenha colunas que a tabela não conhece
+> (`TOO_MANY_DATA_COLUMNS`). Quando o batch 2 introduz um campo novo no
+> payload (`source_app`), isso quebra na escrita, não na leitura. A seção
+> "Append na tabela Iceberg" abaixo mostra o mecanismo necessário para a
+> tabela realmente evoluir o schema em vez de só rejeitar.
 
 ### Tratamento do campo `properties`
 
@@ -168,11 +176,46 @@ Rodar o job duas vezes para o mesmo `ingestion_date` remove os registros
 anteriores e reinsere — resultado idêntico. Iceberg suporta DELETE eficiente
 (não reescreve o arquivo inteiro, usa delete files).
 
-### Append na tabela Iceberg
+### Append na tabela Iceberg — evolução de schema (tolerando drift de verdade)
+
+Um `df.writeTo(...).append()` simples **não** absorve um campo novo no
+payload — o Iceberg recusa com `TOO_MANY_DATA_COLUMNS`. Para a tabela
+realmente evoluir (nova coluna, `NULL` nos registros antigos, em vez de
+quebrar), duas coisas são necessárias:
+
+**1. Autorizar a tabela a aceitar schema divergente do DataFrame**:
+```python
+spark.sql(f"""
+    ALTER TABLE {BRONZE_NAMESPACE}.events
+    SET TBLPROPERTIES ('write.spark.accept-any-schema' = 'true')
+""")
+```
+
+**2. Reordenar as colunas do DataFrame antes do write**: mesmo com o
+`mergeSchema` habilitado, o Iceberg exige que a **ordem física** das colunas
+do DataFrame bata com a ordem final da tabela (colunas conhecidas, na ordem
+declarada no `CREATE TABLE`, seguidas das colunas novas de drift, no fim).
+A leitura via `spark.read.json(...)` não garante ordem alguma (o schema
+inferido normalmente sai em ordem alfabética), então sem essa reordenação o
+write falha com um segundo erro (`IllegalArgumentException: ... is out of
+order`) mesmo depois do passo 1:
 
 ```python
-df.writeTo(f"{BRONZE_NAMESPACE}.events").append()
+known_columns = [
+    "event_id", "customer_id", "event_type", "occurred_at", "updated_at",
+    "channel", "properties", "_ingested_at", "_source_file", "_batch_id",
+]
+drift_columns = sorted(c for c in df.columns if c not in known_columns)
+df = df.select(*known_columns, *drift_columns)
 ```
+
+**3. Só então o append, com `mergeSchema=true`**:
+```python
+df.writeTo(f"{BRONZE_NAMESPACE}.events").option("mergeSchema", "true").append()
+```
+
+Detalhes completos da investigação (o erro exato, por que aconteceu e como
+foi validado) em `AJUSTES_PARTE2_TRANSFORM.md`.
 
 ### Log ao final
 
@@ -257,6 +300,20 @@ spark.sql(f"""
 vieram. A conversão para BOOLEAN acontece na Silver, onde temos controle total
 do schema.
 
+> **Atenção — cast explícito é obrigatório, não opcional**: `is_active`
+> chega do Postgres como booleano nativo no JSON (`true`/`false`), não como
+> string. Um `df.writeTo(...).append()` direto falha com
+> `Cannot change column type: is_active: string -> boolean` se o write for
+> feito com `mergeSchema=true` (o Spark interpreta a diferença de tipo como
+> tentativa de evoluir a coluna, e o Iceberg recusa `STRING → BOOLEAN` por
+> ser uma mudança incompatível). **Este job não precisa de `mergeSchema`**
+> — `customers` não tem schema drift no batch 2 (só `events` ganha campo
+> novo) — então a correção certa é cast explícito antes do write:
+> ```python
+> if "is_active" in df.columns:
+>     df = df.withColumn("is_active", F.col("is_active").cast("string"))
+> ```
+
 **Idempotência**:
 ```python
 spark.sql(f"""
@@ -265,8 +322,18 @@ spark.sql(f"""
 """)
 ```
 
-**Append**:
+**Append** — exige a mesma reordenação de colunas do `bronze_events.py`
+(o Iceberg exige que a ordem do DataFrame bata com a da tabela, e a leitura
+do JSON não garante ordem alguma):
 ```python
+known_columns = [
+    "customer_id", "company_name", "plan", "segment", "signup_date",
+    "country", "is_active", "updated_at", "_ingested_at", "_source_file",
+    "_batch_id",
+]
+drift_columns = sorted(c for c in df.columns if c not in known_columns)
+df = df.select(*known_columns, *drift_columns)
+
 df.writeTo(f"{BRONZE_NAMESPACE}.customers").append()
 ```
 
@@ -333,3 +400,12 @@ docker compose exec spark spark-submit \
   `_batch_id` antes do append garante resultado idêntico.
 - `_batch_id = ingestion_date` é determinístico — não usar timestamp nem UUID,
   que quebrariam a idempotência.
+- **O avaliador vai testar o schema drift de verdade rodando contra o batch 2**
+  (que introduz o campo `source_app` no payload de `events`). "Tolerar schema
+  drift" não é automático: exige `write.spark.accept-any-schema=true` na
+  tabela + `mergeSchema=true` no write + reordenar as colunas do DataFrame
+  antes do append (o Iceberg exige que a ordem física bata com a da tabela,
+  e a leitura de JSON não garante ordem nenhuma). Sem isso, o job quebra com
+  `TOO_MANY_DATA_COLUMNS` já no primeiro campo novo. Ver as seções "Append
+  na tabela Iceberg" acima e `AJUSTES_PARTE2_TRANSFORM.md` para o erro exato
+  e a validação.
