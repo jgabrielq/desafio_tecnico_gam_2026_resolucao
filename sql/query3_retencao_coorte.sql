@@ -8,7 +8,7 @@ SELECT
 FROM lakehouse.gold.retencao_coorte
 ORDER BY cohort_month, activity_month;
 
--- Interpretação:
+-- Interpretação numérica:
 -- A retenção é alta e estável na maioria das coortes: quase todas mantêm
 -- entre 85% e 100% de clientes ativos nos meses observados, sem uma queda
 -- sistemática conforme o tempo passa desde o signup — coortes de 2025
@@ -19,3 +19,8 @@ ORDER BY cohort_month, activity_month;
 -- tempo para gerar eventos e ainda não tem dados suficientes para
 -- comparação justa com as coortes mais maduras. No geral, o produto não
 -- aparenta ter um problema de churn ao longo do tempo.
+
+-- Interpretação qualitativa:
+-- Esse é um resultado muito bom porque mostra que clientes adquiridos com campanhas promocionais
+-- não possuem taxa de churn maiores, o que normalmente acontece quando o desconto aplicado na sua aquisição
+-- expira, por exemplo.

@@ -14,7 +14,7 @@ SELECT
 FROM lakehouse.gold.tempo_resposta_ticket
 ORDER BY mes, plan;
 
--- Interpretação:
+-- Interpretação numérica:
 -- Há um SLA claramente diferenciado por plano: clientes "enterprise" recebem
 -- a primeira resposta em ~31-33 minutos em média, contra ~111-122 minutos no
 -- plano "pro" (3-4x mais lento) e ~312-354 minutos (5-6 horas) no plano
@@ -26,3 +26,9 @@ ORDER BY mes, plan;
 -- demais planos, sugerindo que a falha em responder não está relacionada
 -- ao SLA prometido, e sim a uma fração de tickets que simplesmente não
 -- recebe nenhuma réplica.
+
+-- Interpretação qualitativa:
+-- O melhor SLA pertence ao plano mais caro mas não necessariamente ao plano que mais recorre
+-- ao Suporte e ao que possui uma maior taxa de retenção. Seria interessante avaliar uma mudança
+-- no fluxo do Suporte para melhorar os indicadores dos planos que possuem maior atrito com a área de 
+-- Customer Success
