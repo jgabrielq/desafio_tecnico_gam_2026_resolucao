@@ -13,7 +13,7 @@ Documentos de referência (já existentes, não recriar):
 - `docs/ARQUITETURA.md` — respostas às 6 perguntas obrigatórias do enunciado (particionamento, idempotência, SCD2, volume 100x, etc.).
 - `docs/DISCUSSOES_PARTE1.md`, `docs/DISCUSSOES_PART2_a.md`, `docs/DISCUSSOES_PART3.MD`, `docs/DISCUSSOES_PARTE4.md` — notas de discussão por parte.
 - `docs/PRIMER_ICEBERG.md`, `docs/CONCEITOS_REVISAR.md`, `docs/SCHEMA_DRIFT.md`, `docs/ENVIRONMENT_FIXES.md`, `docs/README_ambiente.md`.
-- `SPEC_PART1_INGESTION.md`, `SPEC_PART2_a_TRANSFORM.md`, `SPEC_PART2_b_TRANSFOMR.md`, `SPEC_PART3_GOLD.MD`, `SPEC_PART4_QUALITY_CHECK.md` — especificações técnicas de cada parte (ingestão, Bronze, Silver, Gold, Qualidade). As specs da Bronze e Qualidade têm notas inline documentando os ajustes que precisaram ser feitos sobre o texto original.
+- `SPEC_PART1_INGESTION.md`, `SPEC_PART2_a_TRANSFORM.md`, `SPEC_PART2_b_TRANSFOMR.md`, `SPEC_PART3_GOLD.MD`, `SPEC_PART4_QUALITY_CHECK.md`, `SPEC_PART5_DAG.md` — especificações técnicas de cada parte (ingestão, Bronze, Silver, Gold, Qualidade, DAG). As specs da Bronze e Qualidade têm notas inline documentando os ajustes que precisaram ser feitos sobre o texto original.
 - `AJUSTES_PARTE1_INGESTION.md`, `AJUSTES_PARTE2_TRANSFORM.md`, `AJUSTES_PARTE4_QUALITY.md` — problemas reais descobertos ao validar cada parte (causa raiz + correção). Ler antes de mexer de novo nos arquivos que eles cobrem.
 - `RODAR_PIPELINE.md` — todos os comandos CLI para rodar/validar o ambiente e cada etapa do pipeline, isolada ou na sequência completa de aceite do desafio. Referência canônica de comandos — preferir isso a redigitar comandos do zero.
 - `README.md` — documentação de `ingestion/`, `transform/` e `quality/` (inclui diagramas Mermaid de execução de cada camada e da arquitetura completa).
@@ -124,8 +124,8 @@ make up           # sobe tudo de novo e valida (12/12 checks)
 
 ## Estado atual do trabalho (última sessão)
 
-**Partes 1 a 4 concluídas e validadas: Ingestão, Bronze, Silver, Gold e Qualidade.**
-**Falta apenas a Parte 5 (DAG do Airflow + finalização de docs) antes da entrega.**
+**Todas as 5 partes implementadas: Ingestão, Bronze, Silver, Gold, Qualidade e DAG.**
+**Falta só uma revisão final antes da entrega (prazo: quarta 16/09 às 16h — hoje).**
 
 Repositório git inicializado nesta sessão (`git init` + commits incrementais); antes
 disso o diretório não era um repo.
@@ -180,19 +180,32 @@ disso o diretório não era um repo.
   + arquitetura completa.
 - `RODAR_PIPELINE.md` criado: referência única com todos os comandos CLI de
   ambiente/execução/validação, camada por camada ou na sequência completa de aceite.
+- `dags/dag_pipeline.py`: DAG do Airflow (`lakehouse_pipeline`) implementada conforme
+  `SPEC_PART5_DAG.md`, sem nenhuma adaptação sobre a spec (código consolidado final
+  transcrito literalmente). Encadeia `ingestao_raw` (`PythonOperator`, chama
+  `run_pipeline` direto) → `bronze_events`/`bronze_customers` em paralelo
+  (`BashOperator` + `docker exec`) → `silver_events`/`silver_customers` em paralelo →
+  `quality_checks` → `gold`. **Não foi executada** (o enunciado aceita código bem
+  estruturado + explicação sem precisar rodar no ambiente — não há Airflow no ar; o
+  `docker-compose` da infra tem um serviço `airflow` opcional via `make airflow`, mas
+  ele monta `./dags` do **repo de infra**, não deste repo — para testar de verdade
+  seria preciso copiar `dag_pipeline.py` para lá). Validado apenas com
+  `py_compile`/`ast.parse` (sintaxe OK) e verificação manual de que o truque de
+  `.format()` com `{{{{ ds }}}}` resolve corretamente para o template Jinja `{{ ds }}`.
+  Explicação completa das decisões de design em `README.md` (seção "Orquestração").
 - Reorganização manual do usuário: `INGESTIONS_FIXES.md` → `AJUSTES_PARTE1_INGESTION.md`;
   `ingestion/test_raw_connection.py` → `tests/test_raw_connection.py`; `PART2_TEST.md`
   removido (instrução pontual já concluída); `docs/ARQUITETURA.md` preenchido com as
   respostas às 6 perguntas obrigatórias do enunciado.
 
-### Próximos passos (antes da entrega de quarta 16/09)
+### Próximos passos
 
-Conforme `docs/plano_desafio_tecnico.md`:
+Todas as 5 partes do desafio estão implementadas. Antes de considerar a entrega
+fechada, vale:
 
-1. **Parte 5 — Orquestração + Docs**: DAG do Airflow encadeando
-   raw → bronze → silver → **qualidade** → gold (ordem definida na
-   `SPEC_PART4_QUALITY_CHECK.md`: qualidade roda depois da Silver e antes da Gold);
-   finalizar `README.md` e `ARCHITECTURE.md`.
+1. Revisão final de tudo (README, ARQUITETURA.md, specs com notas de ajuste, código) —
+   nenhuma parte pendente identificada, mas não houve uma passada de revisão completa
+   de ponta a ponta nesta sessão.
 2. Ambiente de infra atual está no **batch 2**, com dado de teste já processado em todas
    as camadas (incluindo `lakehouse.quality.check_results`, que não é idempotente — cada
    execução de teste soma linhas novas). Considerar `make clean && make up` antes de uma
@@ -200,6 +213,8 @@ Conforme `docs/plano_desafio_tecnico.md`:
 3. Ao rodar `quality/checks.py` de novo, escolher `--ingestion_date` de forma coerente com
    a linha do tempo do batch sendo processado (não a data literal do calendário real) —
    ver a nuance documentada em `AJUSTES_PARTE4_QUALITY.md` sobre o check de freshness.
+4. Se quiser demonstrar a DAG rodando de verdade (não exigido pelo enunciado): copiar
+   `dags/dag_pipeline.py` para a pasta `dags/` do repo de infra e subir com `make airflow`.
 
 Pontos de decisão já tomados (não reabrir sem motivo, ver `docs/plano_desafio_tecnico.md`):
 watermark incremental em arquivo JSON no MinIO (não em tabela Iceberg nem Airflow Variable);

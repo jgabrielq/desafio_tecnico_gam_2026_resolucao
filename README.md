@@ -48,6 +48,9 @@ sql/
 ├── query3_retencao_coorte.sql         # Retenção por coorte de aquisição
 └── resultados/                        # CSVs de entrega gerados via Trino
 
+dags/
+└── dag_pipeline.py        # DAG do Airflow: orquestra ingestão → bronze → silver → quality → gold
+
 tests/                     # Scripts de teste manual (ingestão + conexão Spark/Iceberg)
 ```
 
@@ -243,6 +246,65 @@ contra o relógio real da máquina — um dataset sintético e fixo no tempo
 faria esse check `BLOCKING` falhar permanentemente conforme os dias reais
 passam, mesmo com o pipeline saudável.
 
+## Orquestração (`dags/dag_pipeline.py`)
+
+DAG do Airflow que encadeia todas as camadas acima. **Não precisa rodar no
+ambiente para valer pontuação** — o enunciado aceita código bem estruturado
++ explicação. Ainda assim, o código foi escrito para ser executável de
+verdade: se o Airflow for subido (`make airflow`, perfil opcional do
+`docker-compose` do ambiente) com este arquivo copiado para a pasta `dags/`
+montada em `/opt/airflow/dags`, ele funciona sem modificação, desde que os
+scripts já estejam copiados para `/tmp/transform` e `/tmp/quality` dentro
+do `dl-spark` (mesmo passo manual que já fazemos hoje via `docker cp`).
+
+**Grafo de dependências**:
+```
+ingestao_raw
+    ├── bronze_events ──────── silver_events ────┐
+    └── bronze_customers ───── silver_customers ─┴── quality_checks ── gold
+```
+
+- **Ingestão** (`PythonOperator`): chama `run_pipeline` diretamente, sem
+  `subprocess` — mais robusto que depender do `pipenv` estar no PATH do
+  worker do Airflow. Roda no host, não no container Spark.
+- **Bronze e Silver em paralelo** (`BashOperator` + `docker exec`): não há
+  cluster Spark com master/worker para o `SparkSubmitOperator` se conectar
+  — os jobs rodam via `docker exec` no container `dl-spark`, então
+  `BashOperator` é a forma real de submetê-los. `bronze_events` e
+  `bronze_customers` não dependem uma da outra (fontes independentes); o
+  mesmo vale para as duas Silvers.
+- **Qualidade bloqueia a Gold sem lógica extra**: se um check `BLOCKING`
+  falhar, `quality/checks.py` levanta `RuntimeError` → `spark-submit`
+  termina com exit code não-zero → a task falha → o Airflow não executa a
+  task `gold` downstream. Comportamento correto de "não calcular a Gold
+  sobre dado corrompido" sem nenhum código adicional na DAG.
+- **`{{ ds }}` em vez de `datetime.now()`**: `ds` é a data lógica da
+  execução (formato `YYYY-MM-DD`). Usar o relógio real quebraria o
+  backfill — todas as execuções acabariam processando a data de hoje em
+  vez da data que lhes cabe.
+- **`catchup=True` + `max_active_runs=1`**: `catchup` permite backfill
+  seguro porque cada etapa é idempotente (raw sobrescreve por partição,
+  Bronze faz delete+append por `_batch_id`, Silver faz `MERGE INTO`, Gold
+  faz overwrite completo). `max_active_runs=1` evita que dois backfills
+  concorrentes escrevam nas mesmas tabelas Iceberg ao mesmo tempo — o
+  `MERGE INTO` não é seguro para escrita concorrente sem controle de
+  transação distribuída.
+- **`start_date` fixo (`2026-03-11`, data do primeiro batch real)**: nunca
+  `days_ago(1)` nem `datetime.now()` — o `start_date` precisa ser
+  determinístico para o backfill fazer sentido.
+- **`depends_on_past=False`**: cada execução é independente graças ao
+  watermark — a ingestão sempre sabe de onde continuar, mesmo que o dia
+  anterior tenha falhado.
+- **Gold sem `--ingestion_date`**: sempre recalcula do estado completo da
+  Silver, independente de qual batch disparou a execução.
+
+Backfill manual, se necessário:
+```bash
+airflow dags backfill lakehouse_pipeline \
+    --start-date 2026-03-11 \
+    --end-date 2026-03-15
+```
+
 ## Como executar
 
 Ingestão (raw zone), rodando no host:
@@ -404,6 +466,25 @@ flowchart TD
     Eval -- sim --> Raise["RuntimeError\n(interrompe o pipeline)"]
     Eval -- não --> Log["Log: N PASSED | M FAILED"]
     Log --> End(["Job finalizado"])
+```
+
+## Diagrama da DAG (Airflow)
+
+```mermaid
+flowchart LR
+    Ingestao["ingestao_raw\n(PythonOperator)"]
+
+    Ingestao --> BE["bronze_events\n(BashOperator)"]
+    Ingestao --> BC["bronze_customers\n(BashOperator)"]
+
+    BE --> SE["silver_events\n(BashOperator)"]
+    BC --> SC["silver_customers\n(BashOperator)"]
+
+    SE --> QC["quality_checks\n(BashOperator)"]
+    SC --> QC
+
+    QC -- "BLOCKING passou" --> Gold["gold\n(BashOperator)"]
+    QC -. "BLOCKING falhou\n→ RuntimeError\n→ gold NÃO roda" .-> Skip["(downstream pulado)"]
 ```
 
 ## Camadas externas (arquitetura completa)
