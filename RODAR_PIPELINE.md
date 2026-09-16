@@ -1,13 +1,34 @@
 # Rodar o Pipeline — Comandos de Referência
 
 Guia com todos os comandos para subir/validar o ambiente e rodar o pipeline
-completo (raw → bronze → silver → gold), em conjunto ou etapa por etapa.
-Assume que a infra (MinIO, Postgres, mock API, Iceberg REST, Spark, Trino)
-está definida em outro repositório, no path usado nesta máquina:
+completo (raw → bronze → silver → qualidade → gold), em conjunto ou etapa
+por etapa. Assume que a infra (MinIO, Postgres, mock API, Iceberg REST,
+Spark, Trino) está definida em outro repositório, no path usado nesta
+máquina:
 
 ```bash
 INFRA_DIR=/home/jgabrielq/repo_desafio_tecnico/desafio-pleno-2026-2
 ```
+
+## Atalho — tudo em no máximo 3 comandos
+
+Para rodar a sequência de teste completa exigida pelo desafio sem digitar
+comando por comando, use o script `run_full_pipeline_test.sh` (raiz do
+repo). Ele mesmo faz o deploy do código, roda ingestão → bronze → silver →
+qualidade → gold para o batch 1 (duas vezes), dispara o `make batch2`, e
+repete tudo para o batch 2 (duas vezes) — mostrando o resultado de cada
+etapa e um resumo final.
+
+```bash
+cd "$INFRA_DIR" && make restart                          # 1. ambiente do zero
+cd /home/jgabrielq/repo_resolucao_desafio_tecnico_gam \
+    && pipenv install                                     # 2. dependências (uma vez só)
+./run_full_pipeline_test.sh                               # 3. sequência de teste completa
+```
+
+O restante deste documento detalha os comandos individuais que o script
+executa por baixo dos panos — útil para rodar uma camada isolada durante o
+desenvolvimento, sem precisar da sequência inteira.
 
 ---
 
@@ -69,8 +90,7 @@ reset parcial para o CRM — `make reset-batch` só reseta a mock API).
 
 ```bash
 cd "$INFRA_DIR"
-make clean   # derruba containers e apaga volumes (MinIO, Postgres, Iceberg)
-make up      # sobe tudo de novo e valida
+make restart   # atalho para: make clean (apaga volumes) + make up
 ```
 
 Use antes de repetir a sequência batch1→batch2 do zero, ou sempre que
@@ -134,7 +154,7 @@ docker exec dl-minio sh -c "mc cat local/lakehouse/raw/events/ingestion_date=202
 ### 3.6 Teste de conexão Spark → raw zone + catálogo Iceberg
 
 ```bash
-docker cp ingestion/test_raw_connection.py dl-spark:/tmp/test_raw_connection.py
+docker cp tests/test_raw_connection.py dl-spark:/tmp/test_raw_connection.py
 docker exec dl-spark spark-submit /tmp/test_raw_connection.py
 ```
 
@@ -185,16 +205,62 @@ docker exec -e PYTHONPATH=/tmp dl-spark spark-submit \
     /tmp/transform/silver_customers.py --ingestion_date 2026-03-11
 ```
 
-As contagens (seção 6) devem ficar idênticas às da primeira execução.
+As contagens (seção 7) devem ficar idênticas às da primeira execução.
 
 ---
 
-## 5. Etapa 3 — Gold (transform/gold.py)
+## 5. Etapa 3 — Qualidade (quality/checks.py)
+
+Roda sobre a Silver. `BLOCKING` interrompe o job com `RuntimeError`
+(exit code não-zero); `WARNING` só registra.
+
+### 5.1 Copiar o código para o container
+
+```bash
+docker cp quality dl-spark:/tmp/quality
+```
+
+### 5.2 Rodar os checks
+
+```bash
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit \
+    /tmp/quality/checks.py --ingestion_date 2026-03-11
+```
+
+**Atenção com a escolha do `--ingestion_date`**: o check de `freshness`
+(BLOCKING) compara essa data contra o `MAX(occurred_at)` do próprio batch
+na Silver. Use uma data coerente com a linha do tempo do batch sendo
+processado (ex.: `2026-03-11` para o batch 1, `2026-09-01` para o batch 2 —
+não a data literal do calendário real), senão o check pode falhar mesmo
+com o pipeline saudável. Detalhes em `AJUSTES_PARTE4_QUALITY.md`.
+
+### 5.3 Ver os últimos resultados
+
+```bash
+docker exec dl-trino trino --execute \
+    "SELECT check_name, severity, status, metric_value, threshold_value, details
+     FROM lakehouse.quality.check_results ORDER BY executed_at DESC LIMIT 5"
+```
+
+### 5.4 Teste de "não-idempotência" (intencional)
+
+```bash
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit \
+    /tmp/quality/checks.py --ingestion_date 2026-03-11
+docker exec dl-trino trino --execute "SELECT COUNT(*) FROM lakehouse.quality.check_results"
+```
+
+A contagem total deve **crescer** a cada execução (5 novas linhas) — o log
+de qualidade é histórico por design, não idempotente.
+
+---
+
+## 6. Etapa 4 — Gold (transform/gold.py)
 
 Não recebe `--ingestion_date` — recalcula sempre do estado completo da
 Silver.
 
-### 5.1 Copiar o código atualizado e rodar
+### 6.1 Copiar o código atualizado e rodar
 
 ```bash
 docker cp transform dl-spark:/tmp/transform
@@ -203,7 +269,7 @@ docker exec -e PYTHONPATH=/tmp dl-spark spark-submit \
     /tmp/transform/gold.py
 ```
 
-### 5.2 Teste de idempotência
+### 6.2 Teste de idempotência
 
 ```bash
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py
@@ -211,7 +277,7 @@ docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py
 
 As contagens das 3 tabelas gold devem ficar idênticas.
 
-### 5.3 Gerar os CSVs de entrega (queries analíticas)
+### 6.3 Gerar os CSVs de entrega (queries analíticas)
 
 ```bash
 docker exec dl-trino trino --output-format TSV_HEADER \
@@ -232,17 +298,18 @@ docker exec dl-trino trino --output-format TSV_HEADER \
 
 ---
 
-## 6. Validação via Trino (qualquer etapa)
+## 7. Validação via Trino (qualquer etapa)
 
-### 6.1 Ver tabelas por camada
+### 7.1 Ver tabelas por camada
 
 ```bash
 docker exec dl-trino trino --execute "SHOW TABLES IN lakehouse.bronze"
 docker exec dl-trino trino --execute "SHOW TABLES IN lakehouse.silver"
 docker exec dl-trino trino --execute "SHOW TABLES IN lakehouse.gold"
+docker exec dl-trino trino --execute "SHOW TABLES IN lakehouse.quality"
 ```
 
-### 6.2 Contagens por batch (Bronze)
+### 7.2 Contagens por batch (Bronze)
 
 ```bash
 docker exec dl-trino trino --execute \
@@ -251,7 +318,7 @@ docker exec dl-trino trino --execute \
     "SELECT COUNT(*), _batch_id FROM lakehouse.bronze.customers GROUP BY _batch_id"
 ```
 
-### 6.3 Contagens da Silver
+### 7.3 Contagens da Silver
 
 ```bash
 docker exec dl-trino trino --execute "SELECT COUNT(*) FROM lakehouse.silver.events"
@@ -260,7 +327,7 @@ docker exec dl-trino trino --execute \
 docker exec dl-trino trino --execute "SELECT COUNT(*) FROM lakehouse.silver.customers"
 ```
 
-### 6.4 Contagens da Gold
+### 7.4 Contagens da Gold
 
 ```bash
 docker exec dl-trino trino --execute "SELECT COUNT(*) FROM lakehouse.gold.top_clientes_30d"
@@ -270,14 +337,26 @@ docker exec dl-trino trino --execute "SELECT COUNT(*) FROM lakehouse.gold.tempo_
 docker exec dl-trino trino --execute "SELECT COUNT(*) FROM lakehouse.gold.retencao_coorte"
 ```
 
-### 6.5 Schema de uma tabela
+### 7.5 Resultados de qualidade (todos, ou só os que falharam)
+
+```bash
+docker exec dl-trino trino --execute \
+    "SELECT check_name, severity, status, metric_value, details
+     FROM lakehouse.quality.check_results ORDER BY executed_at DESC"
+
+docker exec dl-trino trino --execute \
+    "SELECT * FROM lakehouse.quality.check_results WHERE status = 'FAILED'
+     ORDER BY executed_at DESC"
+```
+
+### 7.6 Schema de uma tabela
 
 ```bash
 docker exec dl-trino trino --execute "DESCRIBE lakehouse.bronze.events"
 docker exec dl-trino trino --execute "DESCRIBE lakehouse.silver.customers"
 ```
 
-### 6.6 Rodar as 3 queries de entrega diretamente
+### 7.7 Rodar as 3 queries de entrega diretamente
 
 ```bash
 docker exec dl-trino trino --file /dev/stdin < sql/query1_top10_clientes.sql
@@ -287,7 +366,7 @@ docker exec dl-trino trino --file /dev/stdin < sql/query3_retencao_coorte.sql
 
 ---
 
-## 7. Pipeline completo — sequência de aceite do desafio
+## 8. Pipeline completo — sequência de aceite do desafio
 
 Sequência exigida pelo enunciado (nenhum passo pode duplicar, perder dado
 ou quebrar):
@@ -296,54 +375,72 @@ ou quebrar):
 pipeline (batch 1) → pipeline (batch 1 de novo) → make batch2 → pipeline → pipeline de novo
 ```
 
-Onde "pipeline" = ingestão + bronze + silver (+ gold, se estiver validando
-a camada completa). Comandos na ordem:
+Onde "pipeline" = ingestão + bronze + silver + qualidade + gold. O jeito
+mais simples de rodar essa sequência é o script (ver "Atalho" no topo
+deste documento):
+
+```bash
+./run_full_pipeline_test.sh
+```
+
+Se preferir rodar manualmente (ex.: para depurar uma etapa específica),
+os comandos são estes, na ordem:
 
 ```bash
 cd /home/jgabrielq/repo_resolucao_desafio_tecnico_gam
 
-# --- 0. Ambiente limpo (opcional, mas recomendado antes do teste definitivo) ---
-cd "$INFRA_DIR" && make clean && make up
+# --- 0. Ambiente limpo (recomendado antes do teste definitivo) ---
+cd "$INFRA_DIR" && make restart
 cd /home/jgabrielq/repo_resolucao_desafio_tecnico_gam
+
+# --- deploy do código para o container Spark ---
+docker cp transform dl-spark:/tmp/transform
+docker cp quality dl-spark:/tmp/quality
 
 # --- 1. Pipeline, batch 1, execução 1 ---
 pipenv run python -m ingestion.ingest 2026-03-11
-docker cp transform dl-spark:/tmp/transform
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_events.py --ingestion_date 2026-03-11
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_customers.py --ingestion_date 2026-03-11
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_events.py --ingestion_date 2026-03-11
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_customers.py --ingestion_date 2026-03-11
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/quality/checks.py --ingestion_date 2026-03-11
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py
 
-# --- 2. Pipeline, batch 1, execução 2 (idempotência) ---
+# --- 2. Pipeline, batch 1, execução 2 (idempotência) — repete o bloco acima ---
 pipenv run python -m ingestion.ingest 2026-03-11
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_events.py --ingestion_date 2026-03-11
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_customers.py --ingestion_date 2026-03-11
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_events.py --ingestion_date 2026-03-11
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_customers.py --ingestion_date 2026-03-11
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/quality/checks.py --ingestion_date 2026-03-11
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py
 
 # --- 3. Avançar para o batch 2 ---
 cd "$INFRA_DIR" && make batch2
 cd /home/jgabrielq/repo_resolucao_desafio_tecnico_gam
 
-# --- 4. Pipeline, batch 2, execução 1 (use a data de hoje) ---
-pipenv run python -m ingestion.ingest 2026-09-15
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_events.py --ingestion_date 2026-09-15
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_customers.py --ingestion_date 2026-09-15
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_events.py --ingestion_date 2026-09-15
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_customers.py --ingestion_date 2026-09-15
-
-# --- 5. Pipeline, batch 2, execução 2 (idempotência) ---
-pipenv run python -m ingestion.ingest 2026-09-15
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_events.py --ingestion_date 2026-09-15
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_customers.py --ingestion_date 2026-09-15
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_events.py --ingestion_date 2026-09-15
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_customers.py --ingestion_date 2026-09-15
-
-# --- 6. Gold, sempre por cima do estado final da Silver ---
+# --- 4. Pipeline, batch 2, execução 1 ---
+# ingestion_date escolhido logo após o último evento sintético do batch 2
+# (2026-08-31) — não a data literal do calendário real. Ver seção 5.2 sobre
+# por que isso importa para o check de freshness.
+pipenv run python -m ingestion.ingest 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_events.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_customers.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_events.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_customers.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/quality/checks.py --ingestion_date 2026-09-01
 docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py
-docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py   # idempotência
 
-# --- 7. Validar tudo (seção 6 deste documento) ---
+# --- 5. Pipeline, batch 2, execução 2 (idempotência) — repete o bloco acima ---
+pipenv run python -m ingestion.ingest 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_events.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_customers.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_events.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_customers.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/quality/checks.py --ingestion_date 2026-09-01
+docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py
+
+# --- 6. Validar tudo (seção 7 deste documento) ---
 ```
 
 > Nota: use sempre a mesma `ingestion_date` (data de calendário) nos dois
@@ -352,20 +449,22 @@ docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py   # 
 
 ---
 
-## 8. Referência rápida — tudo em uma tabela
+## 9. Referência rápida — tudo em uma tabela
 
 | O que testar | Comando |
 |---|---|
+| **Tudo (3 comandos)** | `make restart` (infra) + `pipenv install` + `./run_full_pipeline_test.sh` |
 | Ambiente no ar | `cd $INFRA_DIR && make check` |
 | Batch atual | `cd $INFRA_DIR && make batch-state` |
 | Avançar batch | `cd $INFRA_DIR && make batch2` |
-| Reset total | `cd $INFRA_DIR && make clean && make up` |
+| Reset total | `cd $INFRA_DIR && make restart` |
 | Ingestão | `pipenv run python -m ingestion.ingest [data]` |
-| Deploy do transform/ | `docker cp transform dl-spark:/tmp/transform` |
+| Deploy do transform/ + quality/ | `docker cp transform dl-spark:/tmp/transform && docker cp quality dl-spark:/tmp/quality` |
 | Bronze events | `docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_events.py --ingestion_date [data]` |
 | Bronze customers | `docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/bronze_customers.py --ingestion_date [data]` |
 | Silver events | `docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_events.py --ingestion_date [data]` |
 | Silver customers | `docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/silver_customers.py --ingestion_date [data]` |
+| Qualidade (5 checks) | `docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/quality/checks.py --ingestion_date [data]` |
 | Gold (todas as 3 tabelas) | `docker exec -e PYTHONPATH=/tmp dl-spark spark-submit /tmp/transform/gold.py` |
 | Ver tabelas de uma camada | `docker exec dl-trino trino --execute "SHOW TABLES IN lakehouse.<camada>"` |
 | Contar linhas de uma tabela | `docker exec dl-trino trino --execute "SELECT COUNT(*) FROM lakehouse.<camada>.<tabela>"` |

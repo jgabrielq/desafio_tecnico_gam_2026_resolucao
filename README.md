@@ -20,6 +20,36 @@ on-premises (MinIO · Iceberg · Spark · Trino):
 Ver também [`RODAR_PIPELINE.md`](RODAR_PIPELINE.md) para todos os comandos
 de execução e validação, camada por camada ou na sequência completa.
 
+## Rodar tudo em 3 comandos
+
+O enunciado pede que seja possível validar a entrega com no máximo 3
+comandos. Do zero (ambiente ainda não existe ou está sujo de testes
+anteriores):
+
+```bash
+# 1. Sobe o ambiente do zero (containers do MinIO, Postgres, mock API,
+#    Iceberg REST, Spark e Trino) e valida (12/12 checks)
+cd /caminho/para/o/repo-de-infra && make restart
+
+# 2. Instala as dependências Python da ingestão (uma vez só)
+cd /caminho/para/este/repo && pipenv install
+
+# 3. Roda a sequência de teste completa exigida pelo desafio —
+#    pipeline(batch1) -> pipeline(batch1 de novo) -> batch2 -> pipeline -> pipeline de novo —
+#    em todas as camadas (ingestão, bronze, silver, qualidade, gold),
+#    mostrando o resultado de cada etapa
+./run_full_pipeline_test.sh
+```
+
+O script (`run_full_pipeline_test.sh`) faz o `docker cp` de `transform/` e
+`quality/` para o container Spark, roda cada etapa, mostra as contagens do
+Trino após cada batch e termina com um resumo (`Etapas OK` / `Etapas
+FALHOU`, exit code não-zero se algo falhar). Ele mesmo dispara o
+`make batch2` no meio da sequência — não precisa rodar isso à parte.
+
+Se o ambiente já estiver de pé e limpo (por exemplo, logo após um
+`make up`), o comando 1 pode ser pulado — bastam os comandos 2 e 3.
+
 ## Estrutura do repositório
 
 ```
@@ -52,6 +82,8 @@ dags/
 └── dag_pipeline.py        # DAG do Airflow: orquestra ingestão → bronze → silver → quality → gold
 
 tests/                     # Scripts de teste manual (ingestão + conexão Spark/Iceberg)
+
+run_full_pipeline_test.sh  # Roda a sequência de teste completa do desafio (ver "Rodar tudo em 3 comandos")
 ```
 
 ## Camada de Ingestão (raw zone)

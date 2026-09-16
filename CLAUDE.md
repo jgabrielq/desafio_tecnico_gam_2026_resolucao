@@ -16,6 +16,7 @@ Documentos de referência (já existentes, não recriar):
 - `SPEC_PART1_INGESTION.md`, `SPEC_PART2_a_TRANSFORM.md`, `SPEC_PART2_b_TRANSFOMR.md`, `SPEC_PART3_GOLD.MD`, `SPEC_PART4_QUALITY_CHECK.md`, `SPEC_PART5_DAG.md` — especificações técnicas de cada parte (ingestão, Bronze, Silver, Gold, Qualidade, DAG). As specs da Bronze e Qualidade têm notas inline documentando os ajustes que precisaram ser feitos sobre o texto original.
 - `AJUSTES_PARTE1_INGESTION.md`, `AJUSTES_PARTE2_TRANSFORM.md`, `AJUSTES_PARTE4_QUALITY.md` — problemas reais descobertos ao validar cada parte (causa raiz + correção). Ler antes de mexer de novo nos arquivos que eles cobrem.
 - `RODAR_PIPELINE.md` — todos os comandos CLI para rodar/validar o ambiente e cada etapa do pipeline, isolada ou na sequência completa de aceite do desafio. Referência canônica de comandos — preferir isso a redigitar comandos do zero.
+- `run_full_pipeline_test.sh` (raiz do repo) — script que roda a sequência de teste completa (batch1×2 → batch2 → batch2×2, todas as camadas) e mostra o resultado de cada etapa. É o comando 3 do fluxo "3 comandos" pedido pelo desafio.
 - `README.md` — documentação de `ingestion/`, `transform/` e `quality/` (inclui diagramas Mermaid de execução de cada camada e da arquitetura completa).
 
 ## Ambiente de infraestrutura
@@ -112,14 +113,19 @@ docker exec dl-trino trino --execute "SELECT check_name, status FROM lakehouse.q
 
 Comandos completos (incluindo a sequência de aceite do desafio) em `RODAR_PIPELINE.md`.
 
+**Atalho em 3 comandos** (o desafio pede que a entrega seja validável assim):
+`make restart` (infra, reset do zero) + `pipenv install` (uma vez) +
+`./run_full_pipeline_test.sh` (raiz deste repo — roda a sequência completa
+batch1×2 → batch2 → batch2×2 em todas as camadas, mostrando o resultado de
+cada etapa e um resumo final; termina com exit code não-zero se algo falhar).
+
 Para avançar as fontes para o batch 2 (simula o tempo passando) e resetar o ambiente
 do zero quando precisar de um estado limpo (destrutivo — apaga volumes Docker):
 
 ```bash
 cd /home/jgabrielq/repo_desafio_tecnico/desafio-pleno-2026-2   # repo de infra
 make batch2      # libera batch 2 na API + aplica mudanças no Postgres (irreversível sem make clean)
-make clean        # derruba containers e apaga volumes (MinIO, Postgres, Iceberg)
-make up           # sobe tudo de novo e valida (12/12 checks)
+make restart     # atalho para make clean (apaga volumes) + make up (sobe tudo de novo e valida)
 ```
 
 ## Estado atual do trabalho (última sessão)
@@ -145,13 +151,23 @@ disso o diretório não era um repo.
   cada `.sql`.
 - Teste de conexão Spark → raw zone + catálogo Iceberg (`tests/test_raw_connection.py`)
   validado dentro do container `dl-spark`.
-- **Sequência de teste completa do desafio executada e validada** (ambiente resetado do
-  zero com `make clean && make up` antes do teste definitivo, para garantir estado limpo):
-  `pipeline (batch1) → pipeline (batch1 de novo) → make batch2 → pipeline → pipeline de novo`.
-  Resultado: sem duplicação, perda de dado ou quebra em nenhuma execução. Contagens finais:
-  Bronze 19.194 eventos / 450 clientes; Silver 18.658 eventos únicos, 450 registros de
-  histórico de clientes (413 correntes, 37 com mudança de plano via SCD2); Gold 10/12/90
-  linhas nas 3 tabelas.
+- **Sequência de teste completa do desafio executada e validada, agora nas 5 camadas**
+  (ingestão → bronze → silver → qualidade → gold), com o ambiente resetado do zero
+  (`make restart`) antes do teste definitivo: `pipeline (batch1) → pipeline (batch1 de
+  novo) → make batch2 → pipeline → pipeline de novo`. Resultado: 30/30 etapas OK, sem
+  duplicação, perda de dado ou quebra em nenhuma execução. Contagens finais: Bronze
+  19.194 eventos / 450 clientes; Silver 18.658 eventos únicos, 450 registros de histórico
+  de clientes (413 correntes, 37 com mudança de plano via SCD2); Qualidade 3 PASSED / 2
+  FAILED no batch 2 (nenhum BLOCKING, WARNINGs esperados); Gold 10/12/90 linhas nas 3
+  tabelas — tudo idêntico entre as duas execuções de cada batch.
+- **`run_full_pipeline_test.sh` criado** (raiz do repo): automatiza essa sequência
+  inteira (deploy do código + as 5 camadas × 4 execuções), mostrando o resultado de cada
+  etapa e um resumo final (`Etapas OK` / `Etapas FALHOU`, exit code não-zero se algo
+  falhar). Usa `ingestion_date=2026-03-11` para o batch 1 e `2026-09-01` para o batch 2
+  (não a data literal do calendário real — importante para o check de `freshness`).
+  Junto com `make restart` (infra) e `pipenv install`, forma o fluxo de "3 comandos"
+  que o desafio pede para validar a entrega — documentado em destaque no topo do
+  `README.md` e do `RODAR_PIPELINE.md`.
 - **Bugs reais descobertos e corrigidos durante as validações** (causa raiz e evidências
   completas em `AJUSTES_PARTE2_TRANSFORM.md` e `AJUSTES_PARTE4_QUALITY.md` — ler antes de
   mexer de novo nesses arquivos):
@@ -208,8 +224,10 @@ fechada, vale:
    de ponta a ponta nesta sessão.
 2. Ambiente de infra atual está no **batch 2**, com dado de teste já processado em todas
    as camadas (incluindo `lakehouse.quality.check_results`, que não é idempotente — cada
-   execução de teste soma linhas novas). Considerar `make clean && make up` antes de uma
-   validação final "limpa" para a entrega, se for repetir a sequência completa do zero.
+   execução de teste soma linhas novas). Rodar `make restart` antes de uma validação final
+   "limpa" para a entrega — o `run_full_pipeline_test.sh` não reseta a infra sozinho, só
+   assume que ela já está limpa quando começa (ele mesmo dispara o `make batch2` no meio
+   da sequência).
 3. Ao rodar `quality/checks.py` de novo, escolher `--ingestion_date` de forma coerente com
    a linha do tempo do batch sendo processado (não a data literal do calendário real) —
    ver a nuance documentada em `AJUSTES_PARTE4_QUALITY.md` sobre o check de freshness.
