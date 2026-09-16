@@ -48,7 +48,7 @@ def run(ingestion_date: str, spark) -> None:
         )
     """)
 
-    # Passo 1 — tipagem do batch de entrada
+    # Passo 1 — tipagem do batch de entrada e criação das colunas SCD2
     df_new = df_bronze \
         .withColumn("updated_at",  F.to_timestamp("updated_at")) \
         .withColumn("signup_date", F.to_date("signup_date")) \
