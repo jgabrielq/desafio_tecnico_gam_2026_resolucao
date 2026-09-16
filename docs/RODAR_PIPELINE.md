@@ -7,8 +7,12 @@ Spark, Trino) está definida em outro repositório, no path usado nesta
 máquina:
 
 ```bash
-INFRA_DIR=/home/jgabrielq/repo_desafio_tecnico/desafio-pleno-2026-2
+export INFRA_DIR=/home/jgabrielq/repo_desafio_tecnico/desafio-pleno-2026-2
 ```
+
+`run_full_pipeline_test.sh` exige `INFRA_DIR` no ambiente (não tem mais
+default hardcoded) — use `export` como acima, ou passe inline
+(`INFRA_DIR=... ./run_full_pipeline_test.sh`).
 
 ## Atalho — tudo em no máximo 3 comandos
 
