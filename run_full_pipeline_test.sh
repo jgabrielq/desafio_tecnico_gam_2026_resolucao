@@ -11,10 +11,11 @@
 # no ar e resetado (ver README.md / RODAR_PIPELINE.md).
 #
 # Uso:
-#   ./run_full_pipeline_test.sh
+#   INFRA_DIR=/caminho/para/o/repo-de-infra ./run_full_pipeline_test.sh
 #
-# Variáveis de ambiente opcionais:
-#   INFRA_DIR    caminho do repositório de infraestrutura (docker-compose)
+# Variáveis de ambiente:
+#   INFRA_DIR    (obrigatória) caminho do repositório de infraestrutura
+#                (docker-compose com MinIO/Postgres/mock API/Spark/Trino)
 #   BATCH1_DATE  ingestion_date usado para o batch 1 (default: 2026-03-11)
 #   BATCH2_DATE  ingestion_date usado para o batch 2 (default: 2026-09-01,
 #                escolhido logo após o último evento sintético do batch 2 —
@@ -23,7 +24,13 @@
 
 set -uo pipefail
 
-INFRA_DIR="${INFRA_DIR:-/home/jgabrielq/repo_desafio_tecnico/desafio-pleno-2026-2}"
+if [ -z "${INFRA_DIR:-}" ]; then
+    echo "ERRO: defina a variável de ambiente INFRA_DIR apontando para o" >&2
+    echo "repositório de infraestrutura (docker-compose)." >&2
+    echo "Exemplo: INFRA_DIR=/caminho/para/o/repo-de-infra ./run_full_pipeline_test.sh" >&2
+    exit 1
+fi
+
 BATCH1_DATE="${BATCH1_DATE:-2026-03-11}"
 BATCH2_DATE="${BATCH2_DATE:-2026-09-01}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

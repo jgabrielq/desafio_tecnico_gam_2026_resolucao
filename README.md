@@ -38,8 +38,12 @@ cd /caminho/para/este/repo && pipenv install
 #    pipeline(batch1) -> pipeline(batch1 de novo) -> batch2 -> pipeline -> pipeline de novo —
 #    em todas as camadas (ingestão, bronze, silver, qualidade, gold),
 #    mostrando o resultado de cada etapa
-./run_full_pipeline_test.sh
+INFRA_DIR=/caminho/para/o/repo-de-infra ./run_full_pipeline_test.sh
 ```
+
+`INFRA_DIR` é obrigatória (o script não assume nenhum caminho padrão) —
+aponte para o repositório de infraestrutura (docker-compose com MinIO,
+Postgres, mock API, Spark e Trino).
 
 O script (`run_full_pipeline_test.sh`) faz o `docker cp` de `transform/` e
 `quality/` para o container Spark, roda cada etapa, mostra as contagens do

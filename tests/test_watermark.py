@@ -1,6 +1,5 @@
 import boto3
 import sys
-import os
 from ingestion import config
 from ingestion.watermark import read_watermark, write_watermark
 from pathlib import Path

@@ -8,10 +8,15 @@ boto3 = "*"
 requests = "*"
 psycopg2-binary = "*"
 python-dotenv = "*"
-tenacity = "*"
 
 [dev-packages]
 ipykernel = "*"
+# pyspark e apache-airflow não são instalados no host em produção — os jobs
+# rodam dentro dos containers dl-spark (que já tem Spark 3.5.5 + Iceberg) e
+# de um Airflow separado. Declarados aqui só para suporte de IDE/lint local
+# de transform/, quality/ e dags/.
+pyspark = "*"
+apache-airflow = "*"
 
 [requires]
 python_version = "3.14"
